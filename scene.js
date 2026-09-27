@@ -20,6 +20,7 @@
  * @module dsh-tui-session-manager/scene
  */
 
+import { log } from './debug.js'
 import { sweepSessions } from './sweep.js'
 
 /** Home prefix, so long working directories read as `~/…`. */
@@ -63,6 +64,7 @@ export function createSessionManagerScene(options = {}) {
 
     React.useEffect(() => {
       let alive = true
+      log('scene: component mounted, loading sessions')
       Promise.resolve()
         .then(() => channel.listSessions())
         .then((list) => {
@@ -111,6 +113,7 @@ export function createSessionManagerScene(options = {}) {
     const runDelete = async () => {
       const ids = flat.filter((session) => selected.has(session.id)).map((session) => session.id)
       if (ids.length === 0) return
+      log(`scene: delete requested for ${ids.length} session(s): ${ids.join(', ')}`)
       setPhase('busy')
       const lines = []
       const deleted = []
@@ -119,21 +122,26 @@ export function createSessionManagerScene(options = {}) {
         try {
           ok = (await channel.deleteSession(id)) === true
         } catch (error) {
+          log(`scene: deleteSession(${id}) threw — ${errorText(error)}`)
           lines.push(`✗ ${shortId(id)}: ${errorText(error)}`)
           continue
         }
         if (!ok) {
+          log(`scene: deleteSession(${id}) returned false (refused by host)`)
           lines.push(`✗ ${shortId(id)}: refused by host (live session or missing log)`)
           continue
         }
         deleted.push(id)
+        log(`scene: deleteSession(${id}) → true`)
         if (!sweepEnabled) continue
         try {
           const swept = sweepSessions([id], { backup: sweepBackup })
+          log(`scene: sweep ${id} — ${swept.summary}${swept.errors.length > 0 ? ` | errors: ${swept.errors.join('; ')}` : ''}`)
           if (swept.errors.length > 0) {
             lines.push(`! ${shortId(id)}: swept with errors — ${swept.errors.join('; ')}`)
           }
         } catch (error) {
+          log(`scene: sweep ${id} threw — ${errorText(error)}`)
           lines.push(`! ${shortId(id)}: sweep failed — ${errorText(error)}`)
         }
       }

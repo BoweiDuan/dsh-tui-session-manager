@@ -9,20 +9,44 @@
  */
 
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { apply } from '../index.js'
 import { sweepSessions } from '../sweep.js'
 import { createSessionManagerScene } from '../scene.js'
 
-/** Minimal host context stub recording every seam interaction. */
-function mockContext() {
+// The plugin's diagnostics append to `$DSH_TUI_HOME/session-manager.log`.
+// Point that at a throwaway directory for the whole run: a test must never
+// write into the user's real TUI state.
+const probeHome = mkdtempSync(join(tmpdir(), 'session-manager-tests-'))
+process.env.DSH_TUI_HOME = probeHome
+process.on('exit', () => {
+  try {
+    rmSync(probeHome, { recursive: true, force: true })
+  } catch {
+    // A leftover temp directory is not worth failing a test run over.
+  }
+})
+
+/**
+ * Minimal host context stub.
+ *
+ * `ctx.inject(deps, callback)` mirrors Cordis: the callback runs only once the
+ * declared services exist, so `seams: false` reproduces a host that never
+ * mounts them (a headless launch) — where the plugin must stay completely
+ * idle rather than register anything.
+ */
+function mockContext({ seams = true } = {}) {
   const calls = {
     scenes: [],
     commands: [],
     effects: [],
     opened: [],
     disposed: [],
+    injected: [],
   }
   // Cordis resolves one service instance per name; the stub must do the same,
   // otherwise a test cannot mutate the service the plugin actually holds.
@@ -42,29 +66,39 @@ function mockContext() {
       return () => calls.disposed.push('command')
     },
   }
-  const context = {
-    logger: { warn() {} },
-    get(name) {
-      if (name === 'tuiScenes') return scenes
-      if (name === 'commands') return commands
-      return undefined
-    },
+  // The injected child context: services are direct properties, exactly as in
+  // Cordis (property access without a matching inject throws there).
+  const hostContext = {
+    tuiScenes: scenes,
+    commands,
     effect(factory) {
       calls.effects.push(factory)
     },
   }
-  return { context, calls, scenes, commands }
+  const context = {
+    logger: { warn() {} },
+    effect(factory) {
+      calls.effects.push(factory)
+    },
+    inject(dependencies, callback) {
+      calls.injected.push([...dependencies])
+      if (seams) callback(hostContext)
+    },
+  }
+  return { context, calls, scenes, commands, hostContext }
 }
 
-test('apply registers exactly one scene and one command', () => {
-  const { context, calls } = mockContext()
+test('apply waits for the seams and then registers one scene and one command', () => {
+  const { context, calls, hostContext } = mockContext()
   apply(context)
+
+  assert.deepEqual(calls.injected, [['tuiScenes', 'commands']])
 
   assert.equal(calls.scenes.length, 1)
   assert.equal(calls.scenes[0].descriptor.id, 'session-manager')
   assert.equal(typeof calls.scenes[0].descriptor.component, 'function')
-  // The scene must be registered as the plugin's own effect (ledger identity).
-  assert.equal(calls.scenes[0].identity, context)
+  // Registered through the injected fiber, so a service replacement withdraws it.
+  assert.equal(calls.scenes[0].identity, hostContext)
 
   assert.equal(calls.commands.length, 1)
   assert.equal(calls.commands[0].name, 'sessions')
@@ -92,26 +126,19 @@ test('/sessions opens the scene and stays silent in the conversation', () => {
   assert.deepEqual(calls.opened, ['session-manager'])
 })
 
-test('a host without the scene/command seams leaves the plugin idle', () => {
-  let warnings = 0
-  apply({
-    get: () => undefined,
-    logger: {
-      warn() {
-        warnings += 1
-      },
-    },
-    effect() {
-      throw new Error('idle plugin must not register effects')
-    },
-  })
-  assert.equal(warnings, 1)
+test('a host that never mounts the seams leaves the plugin completely idle', () => {
+  const { context, calls } = mockContext({ seams: false })
+  apply(context)
+
+  assert.deepEqual(calls.injected, [['tuiScenes', 'commands']])
+  assert.equal(calls.scenes.length, 0, 'no scene without the seam')
+  assert.equal(calls.commands.length, 0, 'no command without the seam')
+  assert.equal(calls.effects.length, 0, 'nothing to dispose')
 })
 
 test('a failing open reports an error instead of a silent no-op', () => {
-  const { context, calls } = mockContext()
+  const { context, calls, scenes } = mockContext()
   apply(context)
-  const scenes = context.get('tuiScenes')
   scenes.open = () => false
   const result = calls.commands[0].handler({ rawInput: '', attachments: [], agent: {}, commandId: 'x', signal: new AbortController().signal })
   assert.equal(result.kind, 'error')
