@@ -1,0 +1,39 @@
+{
+  "name": "dsh-tui-session-manager",
+  "version": "0.1.0",
+  "description": "Session manager for dsh-tui: a /sessions scene to browse, search and truly delete saved sessions, including the state leftovers the host delete path leaves behind.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-tui",
+    "dsh-plugin",
+    "cordis",
+    "session-management"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "scene.js",
+    "sweep.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/session-manager.test.mjs test/sweep.test.mjs"
+  },
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

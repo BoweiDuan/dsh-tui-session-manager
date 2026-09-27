@@ -1,0 +1,9 @@
+# Bundle patch for dsh-tui-session-manager.
+#
+# One insert: the plugin row joins the dsh-tui profile tree. The plugin talks
+# to the host through ctx.tuiScenes (full-screen scene seam) and ctx.commands
+# (slash-command seam), both already mounted by the dsh-tui bundle — no other
+# row needs restating or overriding.
+- insert:
+    - id: session-manager
+      name: dsh-tui-session-manager
