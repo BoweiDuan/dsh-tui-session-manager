@@ -1,5 +1,7 @@
 # dsh-tui-session-manager
 
+[dsh-TUI](https://github.com/ccch1mneyyy/dsh-TUI) · 一个为 dsh-TUI 生态打造的插件
+
 给 dsh-TUI 的会话管理器：一条 `/sessions` 命令打开全屏面板，按工作区分组浏览、
 过滤、多选，然后**真正删除**保存的会话 —— 并把宿主删除路径留下的状态残留一并清掉。
 
