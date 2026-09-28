@@ -177,7 +177,7 @@ test('the scene renders through the injected React only', () => {
         id: 'ses_aaaaaaaaaaaa',
         kind: 'session',
         title: { text: 'first session', source: 'auto' },
-        cwd: '/Users/duanbowei',
+        cwd: '/home/dev',
         createdAt: 1,
         updatedAt: Date.now(),
         hasPrompt: true,
@@ -208,18 +208,18 @@ test('sweep accepts an empty list as a no-op', () => {
 
 // ── empty artifacts ────────────────────────────────────────────────────────
 //
-// Samples below are real summaries measured on this machine: the 312 B / 466 B
-// rows are boot artifacts (four metadata frames, read back from
-// `~/.dsh/sessions/--Users-duanbowei--/*/session.v4.jsonl.zstd`), the 173975 B
-// row is the live session of the day.
+// Samples below mirror real summaries: the 312 B / 466 B rows are boot
+// artifacts (four metadata frames, read back from
+// `$DSH_HOME/sessions/<projectKey>/<id>/session.v4.jsonl.zstd`), the 173975 B
+// row is a session that holds a real conversation.
 
 /** A host summary as `listSummaries()` emits it (`kind` is an OBJECT). */
 function summary(overrides = {}) {
   return {
     id: '8dd9e72a-d184-419a-9df9-2fbd450db4a7',
     kind: { kind: 'root' },
-    title: { text: 'duanbowei', source: 'fallback' },
-    cwd: '/Users/duanbowei',
+    title: { text: 'my-project', source: 'fallback' },
+    cwd: '/home/dev',
     createdAt: 1790508544315,
     updatedAt: 1790508544322,
     bytes: 312,
@@ -237,7 +237,7 @@ test('a never-used boot artifact is recognised as empty', () => {
 test('a session with a conversation is never treated as empty', () => {
   const real = summary({
     id: 'd2bc1db7-bfd9-4939-aeb0-a5e33a915323',
-    title: { text: '主会场位次表PDF字体改黑体加粗', source: 'auto' },
+    title: { text: 'Redesign the report parser', source: 'auto' },
     bytes: 173975,
     hasPrompt: true,
   })
@@ -253,7 +253,7 @@ test('an unreadable log is listed, not condemned', () => {
   // prove anything; hiding a real session is the worse error.
   assert.equal(isEmptyArtifact(summary({ bytes: undefined })), false)
   assert.equal(isEmptyArtifact(summary({ hasPrompt: true })), false)
-  assert.equal(isEmptyArtifact(summary({ title: { text: 'duanbowei' } })), false, 'missing source')
+  assert.equal(isEmptyArtifact(summary({ title: { text: 'my-project' } })), false, 'missing source')
   assert.equal(isEmptyArtifact(null), false)
   assert.equal(isEmptyArtifact(undefined), false)
 })
@@ -340,7 +340,7 @@ test('e cycles all → empty → hide-empty and the header says which view is on
   const emptySession = summary()
   const realSession = summary({
     id: 'd2bc1db7-bfd9-4939-aeb0-a5e33a915323',
-    title: { text: '主会场位次表PDF字体改黑体加粗', source: 'auto' },
+    title: { text: 'Redesign the report parser', source: 'auto' },
     bytes: 173975,
     hasPrompt: true,
   })
@@ -366,14 +366,14 @@ test('e cycles all → empty → hide-empty and the header says which view is on
   press('e')
   const onlyEmpty = textsOf(draw()).join('\n')
   assert.match(onlyEmpty, /\[empty only\]/)
-  assert.match(onlyEmpty, /duanbowei/)
-  assert.ok(!onlyEmpty.includes('主会场位次表'), 'the real session is filtered out')
+  assert.match(onlyEmpty, /my-project/)
+  assert.ok(!onlyEmpty.includes('Redesign'), 'the real session is filtered out')
 
   press('e')
   const withoutEmpty = textsOf(draw()).join('\n')
   assert.match(withoutEmpty, /\[no empty\]/)
   assert.ok(!withoutEmpty.includes('empty·312B'), 'the artifact is hidden')
-  assert.match(withoutEmpty, /主会场位次表/)
+  assert.match(withoutEmpty, /Redesign/)
 
   press('e')
   assert.ok(!textsOf(draw()).join('\n').includes('[empty'), 'back to the unfiltered view')

@@ -108,5 +108,3 @@ export function apply(ctx) {
 
   log('apply: injected (waiting for tuiScenes + commands)')
 }
-
-export default { name, apply }
