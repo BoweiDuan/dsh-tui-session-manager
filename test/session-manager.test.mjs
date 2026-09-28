@@ -16,7 +16,7 @@ import { test } from 'node:test'
 
 import { apply } from '../index.js'
 import { sweepSessions } from '../sweep.js'
-import { createSessionManagerScene } from '../scene.js'
+import { createSessionManagerScene, isEmptyArtifact } from '../scene.js'
 
 // The plugin's diagnostics append to `$DSH_TUI_HOME/session-manager.log`.
 // Point that at a throwaway directory for the whole run: a test must never
@@ -204,4 +204,225 @@ test('sweep skips unsafe ids and reports a dry run without touching disk', () =>
 test('sweep accepts an empty list as a no-op', () => {
   const result = sweepSessions([], { dryRun: true })
   assert.equal(result.summary, 'nothing to sweep')
+})
+
+// ── empty artifacts ────────────────────────────────────────────────────────
+//
+// Samples below are real summaries measured on this machine: the 312 B / 466 B
+// rows are boot artifacts (four metadata frames, read back from
+// `~/.dsh/sessions/--Users-duanbowei--/*/session.v4.jsonl.zstd`), the 173975 B
+// row is the live session of the day.
+
+/** A host summary as `listSummaries()` emits it (`kind` is an OBJECT). */
+function summary(overrides = {}) {
+  return {
+    id: '8dd9e72a-d184-419a-9df9-2fbd450db4a7',
+    kind: { kind: 'root' },
+    title: { text: 'duanbowei', source: 'fallback' },
+    cwd: '/Users/duanbowei',
+    createdAt: 1790508544315,
+    updatedAt: 1790508544322,
+    bytes: 312,
+    hasPrompt: false,
+    ...overrides,
+  }
+}
+
+test('a never-used boot artifact is recognised as empty', () => {
+  assert.equal(isEmptyArtifact(summary()), true)
+  assert.equal(isEmptyArtifact(summary({ bytes: 466 })), true)
+  assert.equal(isEmptyArtifact(summary({ bytes: 4095 })), true)
+})
+
+test('a session with a conversation is never treated as empty', () => {
+  const real = summary({
+    id: 'd2bc1db7-bfd9-4939-aeb0-a5e33a915323',
+    title: { text: '主会场位次表PDF字体改黑体加粗', source: 'auto' },
+    bytes: 173975,
+    hasPrompt: true,
+  })
+  assert.equal(isEmptyArtifact(real), false)
+  // Each of the three conditions alone is enough to keep a session listed.
+  assert.equal(isEmptyArtifact({ ...real, hasPrompt: false }), false, 'auto title spares it')
+  assert.equal(isEmptyArtifact({ ...real, bytes: 312 }), false, 'hasPrompt true spares it')
+  assert.equal(isEmptyArtifact(summary({ bytes: 4096 })), false, 'at the ceiling it is listed')
+})
+
+test('an unreadable log is listed, not condemned', () => {
+  // The host reports `hasPrompt: true` and `bytes: undefined` when it cannot
+  // prove anything; hiding a real session is the worse error.
+  assert.equal(isEmptyArtifact(summary({ bytes: undefined })), false)
+  assert.equal(isEmptyArtifact(summary({ hasPrompt: true })), false)
+  assert.equal(isEmptyArtifact(summary({ title: { text: 'duanbowei' } })), false, 'missing source')
+  assert.equal(isEmptyArtifact(null), false)
+  assert.equal(isEmptyArtifact(undefined), false)
+})
+
+test('subagent logs are excluded however small they are', () => {
+  // `classify()` returns an object; the old string compare never matched.
+  assert.equal(isEmptyArtifact(summary({ kind: { kind: 'subagent', depth: 1 } })), false)
+  assert.equal(isEmptyArtifact(summary({ kind: 'subagent' })), false)
+  // A fork of a real session keeps its own prompt evidence.
+  assert.equal(isEmptyArtifact(summary({ kind: { kind: 'fork', parent: 'x' } })), true)
+})
+
+/**
+ * A one-pass hooks harness: persistent `useState` slots plus captured
+ * `useEffect` / `useInput` callbacks, so a test drives the scene render by
+ * render instead of mounting a reconciler.
+ */
+function hooksHarness() {
+  const states = []
+  const effects = []
+  const inputs = []
+  let index = 0
+  return {
+    inputs,
+    /** Restart the hook cursor; the call order must be identical every pass. */
+    begin() {
+      index = 0
+    },
+    /** Run the captured effects and let their microtasks settle. */
+    async settle() {
+      for (const effect of effects) {
+        const cleanup = effect?.()
+        if (typeof cleanup === 'function') cleanup
+        await Promise.resolve()
+      }
+      await new Promise((resolve) => setImmediate(resolve))
+    },
+    React: {
+      createElement(type, props, ...children) {
+        return { type, props: { ...(props ?? {}), children } }
+      },
+      useState(initial) {
+        const slot = index++
+        if (!(slot in states)) states[slot] = typeof initial === 'function' ? initial() : initial
+        return [
+          states[slot],
+          (next) => {
+            states[slot] = typeof next === 'function' ? next(states[slot]) : next
+          },
+        ]
+      },
+      useEffect(callback) {
+        effects[index++] = callback
+      },
+    },
+  }
+}
+
+/** Every text node in a tree built by the harness above. */
+function textsOf(node, out = []) {
+  if (node === undefined || node === null) return out
+  if (typeof node === 'string' || typeof node === 'number') {
+    out.push(String(node))
+    return out
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) textsOf(child, out)
+    return out
+  }
+  if (typeof node === 'object' && node.props !== undefined) textsOf(node.props.children, out)
+  return out
+}
+
+test('e cycles all → empty → hide-empty and the header says which view is on', async () => {
+  const harness = hooksHarness()
+  const ui = {
+    Box: 'Box',
+    Text: 'Text',
+    useInput(callback) {
+      harness.inputs.push(callback)
+    },
+    useTerminalSize: () => ({ columns: 100, rows: 30 }),
+  }
+  const emptySession = summary()
+  const realSession = summary({
+    id: 'd2bc1db7-bfd9-4939-aeb0-a5e33a915323',
+    title: { text: '主会场位次表PDF字体改黑体加粗', source: 'auto' },
+    bytes: 173975,
+    hasPrompt: true,
+  })
+  const channel = {
+    listSessions: async () => [emptySession, realSession],
+    deleteSession: async () => true,
+  }
+  const component = createSessionManagerScene()
+  const draw = () => {
+    harness.begin()
+    return component({ React: harness.React, ui, channel, close() {} })
+  }
+  const press = (input, key = {}) => harness.inputs.at(-1)(input, key)
+
+  draw()
+  await harness.settle()
+
+  const browse = textsOf(draw()).join('\n')
+  assert.match(browse, /2 total · 1 empty · 0 selected/)
+  assert.match(browse, /empty·312B/, 'the empty row carries its size')
+  assert.ok(!browse.includes('[empty only]'))
+
+  press('e')
+  const onlyEmpty = textsOf(draw()).join('\n')
+  assert.match(onlyEmpty, /\[empty only\]/)
+  assert.match(onlyEmpty, /duanbowei/)
+  assert.ok(!onlyEmpty.includes('主会场位次表'), 'the real session is filtered out')
+
+  press('e')
+  const withoutEmpty = textsOf(draw()).join('\n')
+  assert.match(withoutEmpty, /\[no empty\]/)
+  assert.ok(!withoutEmpty.includes('empty·312B'), 'the artifact is hidden')
+  assert.match(withoutEmpty, /主会场位次表/)
+
+  press('e')
+  assert.ok(!textsOf(draw()).join('\n').includes('[empty'), 'back to the unfiltered view')
+})
+
+test('the filter narrows what a (select all) covers', async () => {
+  const harness = hooksHarness()
+  const ui = {
+    Box: 'Box',
+    Text: 'Text',
+    useInput(callback) {
+      harness.inputs.push(callback)
+    },
+    useTerminalSize: () => ({ columns: 100, rows: 30 }),
+  }
+  const emptySession = summary()
+  const realSession = summary({
+    id: 'd2bc1db7-bfd9-4939-aeb0-a5e33a915323',
+    title: { text: 'real work', source: 'auto' },
+    bytes: 173975,
+    hasPrompt: true,
+  })
+  const deleted = []
+  const channel = {
+    listSessions: async () => [emptySession, realSession],
+    deleteSession: async (id) => {
+      deleted.push(id)
+      return true
+    },
+  }
+  const component = createSessionManagerScene({ sweep: false })
+  const draw = () => {
+    harness.begin()
+    return component({ React: harness.React, ui, channel, close() {} })
+  }
+  const press = (input, key = {}) => harness.inputs.at(-1)(input, key)
+
+  draw()
+  await harness.settle()
+  press('e') // empty only
+  draw()
+  press('a') // select all visible
+  draw()
+  press('d') // ask
+  draw()
+  press('y') // confirm
+  await harness.settle()
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(deleted, [emptySession.id], 'only the artifact was selected and deleted')
+  assert.match(textsOf(draw()).join('\n'), /deleted 1/)
 })

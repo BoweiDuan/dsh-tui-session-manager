@@ -32,6 +32,19 @@ const CHROME_ROWS = 6
 /** How many report lines the done state shows at once. */
 const REPORT_ROWS = 4
 
+/** Filter modes cycled by `e`: everything, only empty artifacts, everything but them. */
+const FILTER_MODES = ['all', 'empty', 'hide-empty']
+
+/**
+ * Byte ceiling below which a prompt-less log counts as a boot artifact.
+ *
+ * A session created by the host but never spoken to holds four metadata frames
+ * (`session` / `permission/preset` / `sandbox/mode` / `approval/policy`) and
+ * lands at 312~466 B on disk. The ceiling leaves room for extra settings frames
+ * without reaching a log that holds a real conversation.
+ */
+const EMPTY_ARTIFACT_BYTES = 4096
+
 /**
  * Build the scene component.
  *
@@ -58,6 +71,8 @@ export function createSessionManagerScene(options = {}) {
     const [selected, setSelected] = React.useState(() => new Set())
     const [query, setQuery] = React.useState('')
     const [searchMode, setSearchMode] = React.useState(false)
+    /** `all` → `empty` (only boot artifacts) → `hide-empty` → `all`. */
+    const [filterMode, setFilterMode] = React.useState('all')
     /** browse → confirm → busy → done → browse */
     const [phase, setPhase] = React.useState('browse')
     const [report, setReport] = React.useState([])
@@ -83,7 +98,18 @@ export function createSessionManagerScene(options = {}) {
     // ── projection ─────────────────────────────────────────────────────────
     const all = sessions ?? []
     const needle = query.trim().toLowerCase()
-    const filtered = needle.length === 0 ? all : all.filter((session) => matches(session, needle))
+    const emptyCount = all.filter(isEmptyArtifact).length
+    // Mode filter first, then the free-text needle on top of it: `a` (select
+    // all) and the cursor both stay scoped to whatever is actually visible.
+    const byMode =
+      filterMode === 'empty'
+        ? all.filter(isEmptyArtifact)
+        : filterMode === 'hide-empty'
+          ? all.filter((session) => !isEmptyArtifact(session))
+          : all
+    const filtered = needle.length === 0 ? byMode : byMode.filter((session) => matches(session, needle))
+    const modeSuffix =
+      filterMode === 'empty' ? ' · [empty only]' : filterMode === 'hide-empty' ? ' · [no empty]' : ''
     const groups = groupByWorkspace(filtered)
     /** Filtered sessions in render order: the cursor indexes into this. */
     const flat = []
@@ -190,6 +216,7 @@ export function createSessionManagerScene(options = {}) {
       else if (key.downArrow || input === 'j') setCursor((value) => Math.min(flat.length - 1, value + 1))
       else if (input === ' ' || input === 'x' || key.return) toggle(current?.id)
       else if (input === 'a') toggleAll()
+      else if (input === 'e') setFilterMode((mode) => FILTER_MODES[(FILTER_MODES.indexOf(mode) + 1) % FILTER_MODES.length])
       else if (input === 'd' && selectedCount > 0) setPhase('confirm')
       else if (input === '/') setSearchMode(true)
     })
@@ -222,8 +249,8 @@ export function createSessionManagerScene(options = {}) {
       const pointer = row.isCursor ? '❯' : ' '
       const title = truncate(session.title?.text ?? '(untitled)', Math.max(12, columns - 34))
       const tags = []
-      if (session.kind === 'subagent') tags.push('sub')
-      if (session.hasPrompt === false) tags.push('empty')
+      if (kindOf(session) === 'subagent') tags.push('sub')
+      if (isEmptyArtifact(session)) tags.push(`empty·${formatBytes(session.bytes)}`)
       const meta = `${tags.length > 0 ? `${tags.join(' ')} · ` : ''}${formatAge(session.updatedAt)}`
       return h(
         Box,
@@ -247,13 +274,7 @@ export function createSessionManagerScene(options = {}) {
     } else if (loadError !== undefined) {
       body.push(h(Text, { key: 'error', color: 'error' }, `failed to list sessions: ${loadError}`))
     } else if (display.length === 0) {
-      body.push(
-        h(
-          Text,
-          { key: 'empty', color: 'subtle' },
-          all.length === 0 ? 'no stored sessions' : `no session matches "${query}"`,
-        ),
-      )
+      body.push(h(Text, { key: 'empty', color: 'subtle' }, emptyMessage(all, byMode, filterMode, query)))
     } else {
       body.push(...lines)
     }
@@ -283,7 +304,7 @@ export function createSessionManagerScene(options = {}) {
         h(
           Text,
           { key: 'hint', color: 'subtle' },
-          '↑↓ move · space select · a all · d delete · / filter · esc close',
+          '↑↓ move · space select · a all · d delete · / filter · e empty · esc close',
         ),
       )
     }
@@ -298,7 +319,7 @@ export function createSessionManagerScene(options = {}) {
         h(
           Text,
           { color: 'subtle' },
-          `${all.length} total · ${selectedCount} selected${needle.length > 0 ? ` · "${query}"` : ''}`,
+          `${all.length} total${emptyCount > 0 ? ` · ${emptyCount} empty` : ''} · ${selectedCount} selected${modeSuffix}${needle.length > 0 ? ` · "${query}"` : ''}`,
         ),
       ),
       h(Box, { flexDirection: 'column', flexGrow: 1, overflow: 'hidden' }, ...body),
@@ -374,6 +395,69 @@ function shortId(id) {
 function truncate(text, budget) {
   if (text.length <= budget) return text
   return `${text.slice(0, Math.max(1, budget - 1))}…`
+}
+
+/**
+ * The session's kind as a plain string.
+ *
+ * The host's `classify()` (`dsh-adapter/sessions/header.js`) returns an OBJECT
+ * (`{ kind: 'root' | 'subagent' | 'fork', … }`), so comparing `session.kind`
+ * against a string never matched. Accept both shapes: the object one the host
+ * really sends, and a flat string should a future version unfold it.
+ *
+ * @param {object} session - A host session summary.
+ * @returns {string | undefined} `'root'`, `'subagent'`, `'fork'`, or undefined.
+ */
+function kindOf(session) {
+  const kind = session?.kind
+  if (typeof kind === 'string') return kind
+  if (kind !== null && typeof kind === 'object' && typeof kind.kind === 'string') return kind.kind
+  return undefined
+}
+
+/**
+ * Whether a stored session is a boot artifact rather than a conversation:
+ * created by the host, never spoken to, and still titled after its directory.
+ *
+ * Deliberately conservative — every unknown is treated as a real session, so a
+ * misread summary can only leave an empty row visible, never hide or delete a
+ * session that holds work. The three conditions are:
+ *
+ * 1. not a subagent log (a delegated child holds no human message by design,
+ *    so `hasPrompt` alone would condemn every one of them);
+ * 2. `hasPrompt === false`, which the host sets only after proving there is no
+ *    human frame — an unreadable log is reported as `true`;
+ * 3. a byte size below {@link EMPTY_ARTIFACT_BYTES} AND a fallback title, i.e.
+ *    nothing was ever written that could name the session.
+ *
+ * @param {object} session - A host session summary (`bytes`, `hasPrompt`,
+ *   `title.source`, `kind`).
+ * @returns {boolean} True when the session is safe to treat as empty.
+ */
+export function isEmptyArtifact(session) {
+  if (session === null || typeof session !== 'object') return false
+  if (kindOf(session) === 'subagent') return false
+  if (session.hasPrompt !== false) return false
+  if (typeof session.bytes !== 'number' || !Number.isFinite(session.bytes)) return false
+  if (session.bytes >= EMPTY_ARTIFACT_BYTES) return false
+  return session.title?.source === 'fallback'
+}
+
+/** Compact byte size for a row tag: `312B`, `1.4KB`, `170KB`. */
+function formatBytes(bytes) {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return '?'
+  if (bytes < 1024) return `${bytes}B`
+  const kb = bytes / 1024
+  return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)}KB`
+}
+
+/** The empty-list message, which depends on WHY nothing is listed. */
+function emptyMessage(all, byMode, filterMode, query) {
+  if (all.length === 0) return 'no stored sessions'
+  if (byMode.length > 0) return `no session matches "${query}"`
+  if (filterMode === 'empty') return 'no empty sessions — nothing to clean up'
+  if (filterMode === 'hide-empty') return 'every stored session is an empty artifact (press e)'
+  return `no session matches "${query}"`
 }
 
 /** Error to one line. */
